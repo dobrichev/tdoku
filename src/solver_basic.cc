@@ -30,7 +30,7 @@ struct SolverBasic {
     }
 
     // move a cell with the fewest candidates to the head of the sublist [todo_index:end]
-    void MoveBestTodoToFront(int todo_index) {
+    void MoveBestTodoToFront(size_t todo_index) {
         nth_element(cells_todo_.begin() + todo_index,
                     cells_todo_.begin() + todo_index,
                     cells_todo_.end(),
@@ -61,15 +61,16 @@ struct SolverBasic {
             rows_[row] ^= candidate;
             cols_[col] ^= candidate;
             boxes_[box] ^= candidate;
+ 
+            if (num_solutions_ == 0)
+                solution[row * 9 + col] = (char) ('1' + LowOrderBitIndex(candidate));
 
             // recursively solve remaining todo cells and back out with the solution.
             if (todo_index == num_todo_) {
                 ++num_solutions_;
-                solution[row * 9 + col] = (char) ('1' + LowOrderBitIndex(candidate));
             } else {
                 SatisfyGivenPartialAssignment(todo_index + 1, solution);
                 if (num_solutions_ == limit_) {
-                    solution[row * 9 + col] = (char) ('1' + LowOrderBitIndex(candidate));
                     break;
                 }
             }
@@ -83,12 +84,12 @@ struct SolverBasic {
         }
     }
 
-    void Initialize(const char *input, size_t limit, uint32_t flags, char *solution) {
+    void Initialize(const char *input, size_t limit, uint32_t configuration, char *solution) {
         rows_.fill(kAll);
         cols_.fill(kAll);
         boxes_.fill(kAll);
         limit_ = limit;
-        min_heuristic_ = flags > 0;
+        min_heuristic_ = configuration > 0;
         num_guesses_ = 0;
         num_solutions_ = 0;
 
@@ -119,10 +120,10 @@ struct SolverBasic {
 
 
 extern "C"
-size_t TdokuSolverBasic(const char *input, size_t limit, uint32_t flags,
+size_t TdokuSolverBasic(const char *input, size_t limit, uint32_t configuration,
                         char *solution, size_t *num_guesses) {
     static SolverBasic solver;
-    solver.Initialize(input, limit, flags, solution);
+    solver.Initialize(input, limit, configuration, solution);
     solver.SatisfyGivenPartialAssignment(0, solution);
     *num_guesses = solver.num_guesses_;
     return solver.num_solutions_;

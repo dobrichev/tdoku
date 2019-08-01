@@ -16,20 +16,31 @@
  * sse2 - pentium4 2000
  *   has most of the instructions we'll use, with exceptions noted below
  *
- * ssse3 2006 - core 2006
+ * ssse3 2006 - core2 2006
  *   _mm_shuffle_epi8      // sse2 alt: kind of a mess. see below.
  *
  * sse4_1 - penryn 2007
  *   _mm_testz_si128       // sse2 alt: movemask(cmpeq(setzero())) in sse2
- *   _mm_min_epu16         // sse2 alt: iterate & extract 9 cells
  *   _mm_blend_epi16       // sse2 alt: &| with masks
+ *
+ * sse4_2 - nehalem 2007
+ *   _mm_cmpgt_epi64
  *
  * avx2 - haswell 2013
  *   _mm256 versions of most everything
  *
- * avx-512 - coming with ice lake (for bitalg) 2019/2020
+ * avx512vl
+ *  _mm(256)_ternarylogic_epi32
+ *
+ * avx512bitalg - coming with ice lake 2019/2020
  *   _mm256_popcnt_epi16   // avx512bitalg + avx512vl
  *                         // this might give an interesting boost when available.
+ *
+ * June 2019 Steam monthly hardware survey:
+ *   SSE2        100.00%  +0.00%
+ *   SSSE3        97.74%  +0.17%
+ *   SSE4.1       96.61%  +0.31%
+ *   SSE4.2       95.60%  +0.40%
  */
 
 // for functions like extract below where we use switches to determine which immediate to use
@@ -50,6 +61,19 @@ struct FourBy64 {
     uint64_t x3;
 };
 
+namespace {
+
+struct Consts {
+    __m128i popcount_lookup = _mm_setr_epi8(0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4);
+    __m128i popcount_mask4 = _mm_set1_epi16(0x0f);
+    __m128i rotate_rows1 = _mm_setr_epi8(2, 3, 4, 5, 6, 7, 0, 1, 10, 11, 12, 13, 14, 15, 8, 9);
+    __m128i rotate_rows2 = _mm_setr_epi8(4, 5, 6, 7, 0, 1, 2, 3, 12, 13, 14, 15, 8, 9, 10, 11);
+};
+
+const Consts consts{};
+
+} // namespace
+
 struct Bitvec08x16 {
     __m128i vec;
 
@@ -68,6 +92,33 @@ struct Bitvec08x16 {
         return _mm_set1_epi16(value);
     }
 
+    static inline Bitvec08x16
+    X_or_Y_or_Z(const Bitvec08x16 &x, const Bitvec08x16 &y, const Bitvec08x16 &z) {
+#ifdef __AVX512VL__
+        return _mm_ternarylogic_epi32(x.vec, y.vec, z.vec, 254);
+#else
+        return x | y | z;
+#endif
+    }
+
+    static inline Bitvec08x16
+    X_or_Y_and_Z(const Bitvec08x16 &x, const Bitvec08x16 &y, const Bitvec08x16 &z) {
+#ifdef __AVX512VL__
+        return _mm_ternarylogic_epi32(x.vec, y.vec, z.vec, 248);
+#else
+        return x | (y & z);
+#endif
+    }
+
+    static inline Bitvec08x16
+    X_and_Y_andnot_Z(const Bitvec08x16 &x, const Bitvec08x16 &y, const Bitvec08x16 &z) {
+#ifdef __AVX512VL__
+        return _mm_ternarylogic_epi32(x.vec, y.vec, z.vec, 64);
+#else
+        return x & y.and_not(z);
+#endif
+    }
+
     inline Bitvec08x16 &operator=(const __m128i &m128i) {
         vec = m128i;
         return *this;
@@ -76,7 +127,8 @@ struct Bitvec08x16 {
     inline Bitvec08x16 &operator=(const Bitvec08x16 &other) = default;
 
     inline bool operator==(const Bitvec08x16 &other) const {
-        return (*this ^ other).AllZero();
+        Bitvec08x16 which_equal = WhichEqual(other);
+        return _mm_movemask_epi8(which_equal.vec) == 0xffff;
     }
 
     inline bool operator!=(const Bitvec08x16 &other) const {
@@ -89,41 +141,56 @@ struct Bitvec08x16 {
         return out;
     }
 
-    inline bool AllZero() const {
-#ifdef __SSE4_1__
-        return _mm_test_all_zeros(vec, vec);
-#else
-        return _mm_movemask_epi8(_mm_cmpeq_epi16(vec, _mm_setzero_si128())) == 0xffff;
-#endif
-    }
-
-    inline Bitvec08x16 Equal(const Bitvec08x16 &other) const {
+    inline Bitvec08x16 WhichEqual(const Bitvec08x16 &other) const {
         return _mm_cmpeq_epi16(vec, other.vec);
     }
 
-    inline Bitvec08x16 NonZero() const {
+    inline Bitvec08x16 WhichNonZero() const {
         return _mm_cmpgt_epi16(vec, _mm_setzero_si128());
     }
 
+    inline bool AllZero() const {
+#ifdef __SSE4_1__
+        return _mm_test_all_zeros(vec, vec) != 0;
+#else
+        return _mm_movemask_epi8(WhichEqual(_mm_setzero_si128())) == 0xffff;
+#endif
+    }
+
     inline bool AnyZero() const {
-        Bitvec08x16 which_equal_zero = _mm_cmpeq_epi16(vec, _mm_setzero_si128());
-        return !which_equal_zero.AllZero();
+        Bitvec08x16 which_equal_zero = WhichEqual(_mm_setzero_si128());
+        return _mm_movemask_epi8(which_equal_zero.vec) != 0;
     }
 
     inline bool AnyLessThan(const Bitvec08x16 &other) const {
         Bitvec08x16 which_less_than = _mm_cmpgt_epi16(other.vec, vec);
-        return !which_less_than.AllZero();
+        return _mm_movemask_epi8(which_less_than.vec) != 0;
+    }
+
+    inline bool Intersects(const Bitvec08x16 &other) const {
+        return !_mm_testz_si128(vec, other.vec);
+    }
+
+    inline Bitvec08x16 ClearLowBit() const {
+#ifdef __SSE4_2__
+        __m128i cmp = _mm_cmpgt_epi64(vec, _mm_setzero_si128());
+#else
+        __m128i cmp = _mm_cmpgt_epi32(vec, _mm_setzero_si128());
+        cmp = _mm_or_si128(cmp, _mm_shuffle_epi32(cmp, 0b10110001));
+#endif
+        __m128i one = _mm_andnot_si128(_mm_slli_si128(cmp, 1), _mm_srli_epi64(cmp, 63));
+        return _mm_and_si128(vec, _mm_sub_epi64(vec, one));
     }
 
     // counts the number of bits set among the 9 lowest order bits of each packed 16-bit integer
     // subject to the assumption that the 7 high bits are zero. results are undefined if any of
     // the 7 high bits are nonzero.
     inline Bitvec08x16 Popcounts9() const {
-#ifdef __SSE4_1__
-        Bitvec08x16 lookup = _mm_setr_epi8(0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4);
-        Bitvec08x16 mask4 = _mm_set1_epi16(0x0f);
-        Bitvec08x16 sum_0_3 = lookup.Shuffle(*this & mask4);
-        Bitvec08x16 sum_4_7 = lookup.Shuffle(_mm_srli_epi16(vec, 4));
+#ifdef __SSSE3__
+        Bitvec08x16 sum_0_3 = Bitvec08x16{consts.popcount_lookup}.Shuffle(
+                *this & consts.popcount_mask4);
+        Bitvec08x16 sum_4_7 = Bitvec08x16{consts.popcount_lookup}.Shuffle(
+                _mm_srli_epi16(vec, 4));
         Bitvec08x16 sum_0_7 = _mm_add_epi16(sum_0_3.vec, sum_4_7.vec);
         Bitvec08x16 result = _mm_add_epi16(sum_0_7.vec, _mm_srli_epi16(vec, 8));
         return result;
@@ -148,40 +215,14 @@ struct Bitvec08x16 {
     }
 
     inline int Popcount() const {
-        return NumBitsSet64(_mm_cvtsi128_si64(vec)) +
-               NumBitsSet64(_mm_cvtsi128_si64(_mm_unpackhi_epi64(vec, vec)));
-    }
-
-    inline std::pair<uint16_t, uint16_t> MinPos() const {
-        std::pair<uint16_t, uint16_t> result;
-#ifdef __SSE4_1__
-        uint32_t pair = _mm_extract_epi32(_mm_minpos_epu16(vec), 0);
-        memcpy(&result, &pair, sizeof(pair)); // optimizes nicely
-#else
-        result.first = 0xffffu;
-        auto rows = As_2x64();
-        for (int i = 0; i < 4; i++) {
-            uint16_t val = rows.x0 & 0xffffu;
-            if (result.first > val) {
-                result.first = val;
-                result.second = i;
-            }
-            rows.x0 >>= 16u;
-        }
-        for (int i = 4; i < 8; i++) {
-            uint16_t val = rows.x1 & 0xffffu;
-            if (result.first > val) {
-                result.first = val;
-                result.second = i;
-            }
-            rows.x1 >>= 16u;
-        }
-#endif
-        return result;
+        // unpackhi_epi64+cvtsi128_si64 compiles to the same instructions as extract_epi64,
+        // but works on windows where extract_epi64 is missing.
+        return NumBitsSet64((uint64_t) _mm_cvtsi128_si64(vec)) +
+               NumBitsSet64((uint64_t) _mm_cvtsi128_si64(_mm_unpackhi_epi64(vec, vec)));
     }
 
     inline Bitvec08x16 Shuffle(const Bitvec08x16 &control) const {
-#ifdef __SSE4_1__
+#ifdef __SSSE3__
         return _mm_shuffle_epi8(vec, control.vec);
 #else
         // we'll rely on the assumption that all requested shuffles are for epi16s so each
@@ -209,8 +250,8 @@ struct Bitvec08x16 {
     }
 
     inline Bitvec08x16 RotateRows() const {
-#ifdef __SSE4_1__
-        return Shuffle(_mm_setr_epi8(2, 3, 4, 5, 6, 7, 0, 1, 10, 11, 12, 13, 14, 15, 8, 9));
+#ifdef __SSSE3__
+        return Shuffle(consts.rotate_rows1);
 #else
         __m128i mask1 = _mm_setr_epi16(0xffff, 0xffff, 0xffff, 0x0, 0xffff, 0xffff, 0xffff, 0x0);
         __m128i mask2 = _mm_setr_epi16(0x0, 0x0, 0x0, 0xffff, 0x0, 0x0, 0x0, 0xffff);
@@ -221,8 +262,8 @@ struct Bitvec08x16 {
     }
 
     inline Bitvec08x16 RotateRows2() const {
-#ifdef __SSE4_1__
-        return Shuffle(_mm_setr_epi8(4, 5, 6, 7, 0, 1, 2, 3, 12, 13, 14, 15, 8, 9, 10, 11));
+#ifdef __SSSE3__
+        return Shuffle(consts.rotate_rows2);
 #else
         __m128i mask1 = _mm_setr_epi16(0xffff, 0xffff, 0x0, 0x0, 0xffff, 0xffff, 0x0, 0x0);
         __m128i mask2 = _mm_setr_epi16(0x0, 0x0, 0xffff, 0xffff, 0x0, 0x0, 0xffff, 0xffff);
@@ -329,6 +370,21 @@ struct Bitvec16x16 {
         return Bitvec16x16{Bitvec08x16::All(value), Bitvec08x16::All(value)};
     }
 
+    static inline Bitvec16x16
+    X_or_Y_or_Z(const Bitvec16x16 &x, const Bitvec16x16 &y, const Bitvec16x16 &z) {
+        return Bitvec16x16{x.lo_ | y.lo_ | z.lo_, x.hi_ | y.hi_ | z.hi_};
+    }
+
+    static inline Bitvec16x16
+    X_or_Y_and_Z(const Bitvec16x16 &x, const Bitvec16x16 &y, const Bitvec16x16 &z) {
+        return Bitvec16x16{x.lo_ | (y.lo_ & z.lo_), x.hi_ | (y.hi_ & z.hi_)};
+    }
+
+    static inline Bitvec16x16
+    X_and_Y_andnot_Z(const Bitvec16x16 &x, const Bitvec16x16 &y, const Bitvec16x16 &z) {
+        return Bitvec16x16{x.lo_ & y.lo_.and_not(z.lo_), x.hi_ & y.hi_.and_not(z.hi_)};
+    }
+
     inline Bitvec16x16 &operator=(const Bitvec16x16 &other) = default;
 
     inline bool operator==(const Bitvec16x16 &other) const {
@@ -356,16 +412,16 @@ struct Bitvec16x16 {
         return out;
     }
 
+    inline Bitvec16x16 WhichEqual(const Bitvec16x16 &other) const {
+        return Bitvec16x16{lo_.WhichEqual(other.lo_), hi_.WhichEqual(other.hi_)};
+    }
+
+    inline Bitvec16x16 WhichNonZero() const {
+        return Bitvec16x16{lo_.WhichNonZero(), hi_.WhichNonZero()};
+    }
+
     inline bool AllZero() const {
         return lo_.AllZero() && hi_.AllZero();
-    }
-
-    inline Bitvec16x16 Equal(const Bitvec16x16 &other) const {
-        return Bitvec16x16{lo_.Equal(other.lo_), hi_.Equal(other.hi_)};
-    }
-
-    inline Bitvec16x16 NonZero() const {
-        return Bitvec16x16{lo_.NonZero(), hi_.NonZero()};
     }
 
     inline bool AnyZero() const {
@@ -374,6 +430,10 @@ struct Bitvec16x16 {
 
     inline bool AnyLessThan(const Bitvec16x16 &other) const {
         return lo_.AnyLessThan(other.lo_) || hi_.AnyLessThan(other.hi_);
+    }
+
+    inline bool Intersects(const Bitvec16x16 &other) const {
+        return lo_.Intersects(other.lo_) || hi_.Intersects(other.hi_);
     }
 
     // counts the number of bits set among the 9 lowest order bits of each packed 16-bit integer
@@ -487,6 +547,33 @@ struct Bitvec16x16 {
         return _mm256_set1_epi16(value);
     }
 
+    static inline Bitvec16x16
+    X_or_Y_or_Z(const Bitvec16x16 &x, const Bitvec16x16 &y, const Bitvec16x16 &z) {
+#ifdef __AVX512VL__
+        return _mm256_ternarylogic_epi32(x.vec, y.vec, z.vec, 254);
+#else
+        return x | y | z;
+#endif
+    }
+
+    static inline Bitvec16x16
+    X_or_Y_and_Z(const Bitvec16x16 &x, const Bitvec16x16 &y, const Bitvec16x16 &z) {
+#ifdef __AVX512VL__
+        return _mm256_ternarylogic_epi32(x.vec, y.vec, z.vec, 248);
+#else
+        return x | (y & z);
+#endif
+    }
+
+    static inline Bitvec16x16
+    X_and_Y_andnot_Z(const Bitvec16x16 &x, const Bitvec16x16 &y, const Bitvec16x16 &z) {
+#ifdef __AVX512VL__
+        return _mm256_ternarylogic_epi32(x.vec, y.vec, z.vec, 64);
+#else
+        return x & y.and_not(z);
+#endif
+    }
+
     inline Bitvec16x16 &operator=(const Bitvec16x16 &other) = default;
 
     inline bool operator==(const Bitvec16x16 &other) const {
@@ -514,26 +601,30 @@ struct Bitvec16x16 {
         return out;
     }
 
+    inline Bitvec16x16 WhichEqual(const Bitvec16x16 &other) const {
+        return _mm256_cmpeq_epi16(vec, other.vec);
+    }
+
+    inline Bitvec16x16 WhichNonZero() const {
+        return _mm256_cmpgt_epi16(vec, _mm256_setzero_si256());
+    }
+
     inline bool AllZero() const {
         return _mm256_testz_si256(vec, vec);
     }
 
-    inline Bitvec16x16 Equal(const Bitvec16x16 &other) const {
-        return _mm256_cmpeq_epi16(vec, other.vec);
-    }
-
-    inline Bitvec16x16 NonZero() const {
-        return _mm256_cmpgt_epi16(vec, _mm256_setzero_si256());
-    }
-
     inline bool AnyZero() const {
-        __m256i tmp = _mm256_cmpeq_epi16(vec, _mm256_setzero_si256());
-        return !_mm256_testz_si256(tmp, tmp);
+        Bitvec16x16 which_equal_zero = WhichEqual(_mm256_setzero_si256());
+        return _mm256_movemask_epi8(which_equal_zero.vec) != 0;
     }
 
     inline bool AnyLessThan(const Bitvec16x16 &other) const {
-        auto tmp = _mm256_cmpgt_epi16(other.vec, vec);
-        return !_mm256_testz_si256(tmp, tmp);
+        Bitvec16x16 which_less_than = _mm256_cmpgt_epi16(other.vec, vec);
+        return _mm256_movemask_epi8(which_less_than.vec) != 0;
+    }
+
+    inline bool Intersects(const Bitvec16x16 &other) const {
+        return !_mm256_testz_si256(vec, other.vec);
     }
 
     // counts the number of bits set among the 9 lowest order bits of each packed 16-bit integer
@@ -564,15 +655,12 @@ struct Bitvec16x16 {
         return _mm256_shuffle_epi8(vec, shuffle_control);
     }
 
-    inline Bitvec16x16 RotateCols() const {
-        return _mm256_permute4x64_epi64(vec, 0b00111001);
+    inline Bitvec16x16 RotateRows2() const {
+        return _mm256_shuffle_epi32(vec, 0b10110001);
     }
 
-    inline Bitvec16x16 RotateRows2() const {
-        __m256i shuffle_control =
-                _mm256_setr_epi8(4, 5, 6, 7, 0, 1, 2, 3, 12, 13, 14, 15, 8, 9, 10, 11,
-                                 4, 5, 6, 7, 0, 1, 2, 3, 12, 13, 14, 15, 8, 9, 10, 11);
-        return _mm256_shuffle_epi8(vec, shuffle_control);
+    inline Bitvec16x16 RotateCols() const {
+        return _mm256_permute4x64_epi64(vec, 0b00111001);
     }
 
     inline Bitvec16x16 RotateCols2() const {

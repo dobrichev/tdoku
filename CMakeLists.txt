@@ -2,84 +2,125 @@ cmake_minimum_required(VERSION 3.5)
 project(tdoku VERSION 1.0)
 set(CMAKE_CXX_STANDARD 14)
 
-option(OPT      "Compile with full optimization" ON)
-option(SSE4_1   "Compile with SSE4.1 support" ON)
-option(AVX2     "Compile with AVX2 support" OFF)
-option(AVX512   "Compile with AVX512BITALG support" OFF)
-option(NATIVE   "Compile for native architecture" OFF)
+# e.g., cmake . -DOPT=O2
+set(OPT "O3" CACHE STRING "Optimization level")
+# e.g., cmake . -DARCH=sandybridge
+set(ARCH "native" CACHE STRING "Target architecture")
+# these options specify maximum SSE level and override ARCH
+option(SSE2        "Compile with SSE2 support"         OFF)
+option(SSSE3       "Compile with SSSE3 support"        OFF)
+option(SSE4_1      "Compile with SSE4.1 support"       OFF)
+option(SSE4_2      "Compile with SSE4.2 support"       OFF)
+option(AVX2        "Compile with AVX2 support"         OFF)
+option(AVX512      "Compile with AVX512BITALG support" OFF)
 
-option(FSSS2    "Include fsss2"    OFF)
-option(JCZSOLVE "Include JCZSolve" OFF)
-option(JSOLVE   "Include JSolve"   OFF)
-option(MINISAT  "Include MiniSat"  OFF)
+option(BB_SUDOKU   "Include BB_SUDOKU"   OFF)
+option(JSOLVE      "Include JSolve"      OFF)
+option(KUDOKU      "Include KUDOKU"      OFF)
+option(FSSS2       "Include fsss2"       OFF)
+option(JCZSOLVE    "Include JCZSolve"    OFF)
+option(RUST_SUDOKU "Include rust_sudoku" OFF)
+option(SK_BFORCE2  "Include SK_BFORCE2"  OFF)
+option(MINISAT     "Include MiniSat"     OFF)
 
-if (OPT)
-    set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS}   -O3")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3")
+set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS}   -${OPT}")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -${OPT}")
+
+if(AVX512)
+    set(ArchFlags "-mavx512vl -mavx512bitalg")
+elseif(AVX2)
+    set(ArchFlags "-mavx2")
+elseif(SSE4_2)
+    set(ArchFlags "-msse4.2")
+elseif(SSE4_1)
+    set(ArchFlags "-msse4.1")
+elseif(SSSE3)
+    set(ArchFlags "-mssse3")
+elseif(SSE2)
+    set(ArchFlags "-msse2")
 else()
-    set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS}   -O0")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O0")
+    set(ArchFlags "-march=${ARCH}")
 endif()
 
-if (NATIVE)
-    set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS}   -march=native")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native")
-elseif (AVX512)
-    set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS}   -mavx512vl -mavx512bitalg")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mavx512vl -mavx512bitalg")
-elseif (AVX2)
-    set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS}   -mavx2")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mavx2")
-elseif (SSE4_1)
-    set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS}   -msse4.1")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -msse4.1")
-else()
-    set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS}   -msse2")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -msse2")
-endif()
+set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS}   ${ArchFlags}")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${ArchFlags}")
 
 configure_file (
     "${CMAKE_SOURCE_DIR}/src/build_info.h.in"
-    "${CMAKE_SOURCE_DIR}/src/build_info.h"
-)
+    "${CMAKE_SOURCE_DIR}/src/build_info.h")
 
 # a gcc-linkable library with just the fast solver
 add_library(tdoku STATIC src/solver_dpll_triad_simd.cc)
 target_compile_options(tdoku PUBLIC -fno-exceptions -fno-rtti)
 
+add_library(rust_sudoku SHARED IMPORTED)
+set_target_properties(rust_sudoku PROPERTIES IMPORTED_LOCATION
+        ${CMAKE_SOURCE_DIR}/other/rust_sudoku/libsudoku.so)
+
 set(BENCHMARK_SOLVER_SOURCES
         src/solver_basic.cc
         src/solver_dpll_triad_scc.cc
         src/solver_dpll_triad_simd.cc
-        src/other_solvers.cc)
+        other/other_solvers.cc)
+
+if (BB_SUDOKU)
+    add_definitions(-DBB_SUDOKU)
+    set(BENCHMARK_SOLVER_SOURCES ${BENCHMARK_SOLVER_SOURCES}
+            other/bb_sudoku/bb_sudoku_solver.cpp)
+endif()
+
+if (JSOLVE)
+    add_definitions(-DJSOLVE)
+    set(BENCHMARK_SOLVER_SOURCES ${BENCHMARK_SOLVER_SOURCES}
+            other/JSolve/JSolve.c)
+endif()
+
+if (KUDOKU)
+    add_definitions(-DKUDOKU)
+    set(BENCHMARK_SOLVER_SOURCES ${BENCHMARK_SOLVER_SOURCES}
+            other/kudoku/kudoku.c)
+endif()
 
 if (FSSS2)
     add_definitions(-DFSSS2)
-    set(BENCHMARK_SOLVER_SOURCES ${BENCHMARK_SOLVER_SOURCES} other/fsss2.cpp other/t_128.cpp)
+    set(BENCHMARK_SOLVER_SOURCES ${BENCHMARK_SOLVER_SOURCES}
+            other/fsss2/fsss2.cpp
+            other/fsss2/t_128.cpp)
     set (CMAKE_CXX_FLAGS  "${CMAKE_CXX_FLAGS} -Wno-deprecated-register")
 endif()
 
 if (JCZSOLVE)
     add_definitions(-DJCZSOLVE)
-    set(BENCHMARK_SOLVER_SOURCES ${BENCHMARK_SOLVER_SOURCES} other/JCZSolve.c)
+    set(BENCHMARK_SOLVER_SOURCES ${BENCHMARK_SOLVER_SOURCES}
+            other/JCZSolve/JCZSolve.c)
 endif()
 
-if (JSOLVE)
-    add_definitions(-DJSOLVE)
-    set(BENCHMARK_SOLVER_SOURCES ${BENCHMARK_SOLVER_SOURCES} other/JSolve.c)
+if (RUST_SUDOKU)
+    add_definitions(-DRUST_SUDOKU)
+endif()
+
+if (SK_BFORCE2)
+  add_definitions(-DSK_BFORCE2)
+  set(BENCHMARK_SOLVER_SOURCES ${BENCHMARK_SOLVER_SOURCES}
+          other/SK_BFORCE2/sk_bitfields.cpp
+          other/SK_BFORCE2/sk_t.cpp)
 endif()
 
 if (MINISAT)
     add_definitions(-DMINISAT)
-    set(BENCHMARK_SOLVER_SOURCES ${BENCHMARK_SOLVER_SOURCES} src/solver_minisat.cc)
+    set(BENCHMARK_SOLVER_SOURCES ${BENCHMARK_SOLVER_SOURCES}
+            src/solver_minisat.cc)
 endif()
 
 add_executable(run_benchmark src/run_benchmark.cc ${BENCHMARK_SOLVER_SOURCES})
+add_executable(run_tests test/run_tests.cc ${BENCHMARK_SOLVER_SOURCES})
+
 if (MINISAT)
     target_link_libraries(run_benchmark minisat)
+    target_link_libraries(run_tests minisat)
 endif()
 
-add_executable(run_tests src/run_tests.cc ${BENCHMARK_SOLVER_SOURCES})
-if (MINISAT)
-    target_link_libraries(run_tests minisat)
+if (RUST_SUDOKU)
+    target_link_libraries(run_benchmark rust_sudoku)
+    target_link_libraries(run_tests rust_sudoku)
 endif()

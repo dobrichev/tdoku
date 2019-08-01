@@ -1,8 +1,0 @@
-36a37,39
-> 
-> extern size_t JCZSolve_guesses;
-> 
-931a935
->                         JCZSolve_guesses++;
-960a965
->                 JCZSolve_guesses++;

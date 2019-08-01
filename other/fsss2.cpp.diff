@@ -1,5 +1,0 @@
-212a213,214
-> extern size_t Fsss2_guesses;
-> 
-893a896
-> 		Fsss2_guesses++;
